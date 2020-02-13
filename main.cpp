@@ -7,14 +7,27 @@
 #include <gdiplus.h>
 #pragma comment(lib,"gdiplus")
 
-using namespace std;
+#define BYTE_CHK(n) (n<0?0:(n>=256?255:n))
 
+using namespace std;
+#pragma pack(push, 1)
+typedef struct PIXEL_ARGB{
+	BYTE B;
+	BYTE G;
+	BYTE R;
+	BYTE A;
+}pixelARGB;
+#pragma pack(pop)
+int Height = GetSystemMetrics(SM_CYSCREEN);
+int Width = GetSystemMetrics(SM_CXSCREEN);
+	
 bool dirExists(const string& dirName_in);
 void ConvertCtoWC(const char *str, wchar_t *wstr);
 int GetEncoderClsid(const WCHAR* format, CLSID* pClsid);
-void gdiscreen(const WCHAR* filename);
+void gdiscreen(const WCHAR* filename, bool save);
+void BitmapGrayscale(Gdiplus::Bitmap* bitmap);
 
-int main(){
+int main(int argc, char* argv[]){
 	AllocConsole();//init concole
 	freopen("CONIN$", "r", stdin);
 	freopen("CONOUT$", "w", stdout);
@@ -23,10 +36,19 @@ int main(){
 	wchar_t filenameWC[256];
 	char filename[128];
 	char foldername[128];
-	char path[128] = "C:\\Users\\Administrator\\Downloads";
+	char path[128];
 	char buf[256];
 	time_t curr_time;
+	time_t prev_time = 0;
 	struct tm *curr_tm;
+	int saveDelay = 5;
+
+	sprintf(buf,"%s\\..\\screenCapture", argv[0]);
+	_fullpath(path, buf, sizeof(path));
+
+	if(!dirExists(path))
+		mkdir(path);
+	
 	while(true){
 		time(&curr_time);
 		curr_tm = localtime(&curr_time);
@@ -38,8 +60,12 @@ int main(){
 		strftime(filename, sizeof(filename), "%H-%M-%S", curr_tm);
 		sprintf(buf, "%s\\%s\\%s.jpeg", path, foldername, filename);
 		ConvertCtoWC(buf, filenameWC);
-		gdiscreen(filenameWC);
-		while(!difftime(curr_time ,time(NULL)));
+		if(difftime(curr_time, prev_time) >= saveDelay){
+			time(&prev_time);
+			gdiscreen(filenameWC, true);
+		}
+		else
+			gdiscreen(filenameWC, false);
 	}
 	return 0;
 }
@@ -59,7 +85,7 @@ bool dirExists(const string& dirName_in){
 	return false;		// this is not a directory!
 }
 
-void gdiscreen(const WCHAR* filename){
+void gdiscreen(const WCHAR* filename, bool save){
 	using namespace Gdiplus;
 	GdiplusStartupInput gdiplusStartupInput;
 	ULONG_PTR gdiplusToken;
@@ -68,19 +94,18 @@ void gdiscreen(const WCHAR* filename){
 		HDC scrdc, memdc;
 		HBITMAP membit;
 		scrdc = ::GetDC(0);
-		int Height = GetSystemMetrics(SM_CYSCREEN);
-		int Width = GetSystemMetrics(SM_CXSCREEN);
 		memdc = CreateCompatibleDC(scrdc);
 		membit = CreateCompatibleBitmap(scrdc, Width, Height);
-		HBITMAP hOldBitmap =(HBITMAP) SelectObject(memdc, membit);
+		SelectObject(memdc, membit);
 		BitBlt(memdc, 0, 0, Width, Height, scrdc, 0, 0, SRCCOPY);
 
 		Bitmap bitmap(membit, NULL);
+		BitmapGrayscale(&bitmap);
+	
 		CLSID clsid;
 		GetEncoderClsid(L"image/jpeg", &clsid);
-		bitmap.Save(filename, &clsid, NULL);
-
-		SelectObject(memdc, hOldBitmap);
+		if(save)
+			bitmap.Save(filename, &clsid, NULL);
 		DeleteObject(memdc);
 		DeleteObject(membit);
 		::ReleaseDC(0,scrdc);
@@ -117,4 +142,26 @@ int GetEncoderClsid(const WCHAR* format, CLSID* pClsid){
 
 	free(pImageCodecInfo);
 	return 0;
+}
+
+void BitmapGrayscale(Gdiplus::Bitmap* bitmap){
+	using namespace Gdiplus;
+	auto *bitmapData = new BitmapData;
+	Rect rect(0, 0, Width, Height);
+	bitmap->LockBits(&rect, 3, PixelFormat32bppARGB, bitmapData);
+
+	pixelARGB *pixels = (pixelARGB *)(bitmapData->Scan0);
+	pixelARGB pixel;
+
+	for(int j = 0; j < Height; j++){
+		for(int i = 0; i < Width; i++){
+			int idx = (j * Width) + i;
+			pixel = pixels[idx];
+			BYTE Y = BYTE_CHK(0.2126 * pixel.R + 0.7152 * pixel.G + 0.0722 * pixel.B);
+			pixels[idx] = {Y, Y, Y, 0};
+		}
+	}
+
+	bitmap->UnlockBits(bitmapData);
+	free(bitmapData);
 }

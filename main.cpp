@@ -1,10 +1,11 @@
 #include <iostream>
 #include <ctime>
 #include <cstring>
-#include <vector>
+#include <utility>
 #include <windows.h>
 #include <direct.h>
 #include <gdiplus.h>
+
 #pragma comment(lib,"gdiplus")
 
 #define BYTE_CHK(n) (n<0?0:(n>=256?255:n))
@@ -18,14 +19,17 @@ typedef struct PIXEL_ARGB{
 	BYTE A;
 }pixelARGB;
 #pragma pack(pop)
+
 int Height = GetSystemMetrics(SM_CYSCREEN);
 int Width = GetSystemMetrics(SM_CXSCREEN);
 	
 bool dirExists(const string& dirName_in);
 void ConvertCtoWC(const char *str, wchar_t *wstr);
 int GetEncoderClsid(const WCHAR* format, CLSID* pClsid);
-void gdiscreen(const WCHAR* filename, bool save);
-void BitmapGrayscale(Gdiplus::Bitmap* bitmap);
+bool gdiscreen(const char* filename, bool save);
+
+BYTE* imgArr;
+BYTE* prevImgArr;
 
 int main(int argc, char* argv[]){
 	AllocConsole();//init concole
@@ -33,40 +37,47 @@ int main(int argc, char* argv[]){
 	freopen("CONOUT$", "w", stdout);
 	freopen("CONOUT$", "w", stderr);
 
-	wchar_t filenameWC[256];
+	imgArr = new BYTE[(Width/2) * (Height/2)];
+	prevImgArr = new BYTE[(Width/2) * (Height/2)];
+
 	char filename[128];
 	char foldername[128];
 	char path[128];
 	char buf[256];
 	time_t curr_time;
 	time_t prev_time = 0;
-	struct tm *curr_tm;
-	int saveDelay = 5;
+	struct tm *curr_tm, *tmp_tm;
+	int saveDelay = 5;//sec
+	int deleteDelay = 3;//day
 
 	sprintf(buf,"%s\\..\\screenCapture", argv[0]);
 	_fullpath(path, buf, sizeof(path));
 
 	if(!dirExists(path))
 		mkdir(path);
-	
 	while(true){
 		time(&curr_time);
 		curr_tm = localtime(&curr_time);
 		strftime(foldername, sizeof(foldername), "%y%m%d", curr_tm);
-		if(!dirExists(foldername)){
-			sprintf(buf, "%s\\%s", path, foldername);
+		sprintf(buf, "%s\\%s", path, foldername);
+		if(!dirExists(buf)){
 			mkdir(buf);
+	
+			time_t tmp_time = curr_time - 86400 * deleteDelay;
+			tmp_tm = localtime(&tmp_time);
+			strftime(foldername, sizeof(foldername), "%y%m%d", tmp_tm);
+			sprintf(buf, "rmdir /s /q %s\\%s", path, foldername);//delete directory
+			system(buf);
 		}
 		strftime(filename, sizeof(filename), "%H-%M-%S", curr_tm);
-		sprintf(buf, "%s\\%s\\%s.jpeg", path, foldername, filename);
-		ConvertCtoWC(buf, filenameWC);
-		if(difftime(curr_time, prev_time) >= saveDelay){
+		sprintf(buf, "%s\\%s\\%s", path, foldername, filename);
+		if(gdiscreen(buf, difftime(curr_time, prev_time) >= saveDelay))
 			time(&prev_time);
-			gdiscreen(filenameWC, true);
-		}
-		else
-			gdiscreen(filenameWC, false);
 	}
+
+	delete[] imgArr;
+	delete[] prevImgArr;
+
 	return 0;
 }
 
@@ -85,8 +96,11 @@ bool dirExists(const string& dirName_in){
 	return false;		// this is not a directory!
 }
 
-void gdiscreen(const WCHAR* filename, bool save){
+bool gdiscreen(const char* filename, bool save){
 	using namespace Gdiplus;
+	char buf[256];
+	wchar_t WCbuf[256];
+	int cnt = 0;
 	GdiplusStartupInput gdiplusStartupInput;
 	ULONG_PTR gdiplusToken;
 	GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
@@ -99,18 +113,64 @@ void gdiscreen(const WCHAR* filename, bool save){
 		SelectObject(memdc, membit);
 		BitBlt(memdc, 0, 0, Width, Height, scrdc, 0, 0, SRCCOPY);
 
-		Bitmap bitmap(membit, NULL);
-		BitmapGrayscale(&bitmap);
-	
+		Bitmap origin(membit, NULL);
+		Bitmap bitmap(Width/2, Height/2, PixelFormat32bppARGB);
+
+		//grayscale		
+		auto *bitmapData = new BitmapData;
+		Rect rect(0, 0, Width, Height);
+		origin.LockBits(&rect, ImageLockModeRead, PixelFormat32bppARGB, bitmapData);
+
+		pixelARGB *pixels = (pixelARGB *)(bitmapData->Scan0);
+		pixelARGB pixel;
+
+		for(int j = 0; j < Height; j += 2){
+			for(int i = 0; i < Width; i += 2){
+				pixel = pixels[j * Width + i];
+				imgArr[(j * Width / 2 + i) / 2] = BYTE_CHK(0.2126 * pixel.R + 0.7152 * pixel.G + 0.0722 * pixel.B);
+			}
+		}
+
+		bitmap.UnlockBits(bitmapData);
+
+		Rect arrRect(0, 0, Width/2, Height/2);
+		bitmap.LockBits(&arrRect, ImageLockModeWrite, PixelFormat32bppARGB, bitmapData);
+
+		pixels = (pixelARGB *)(bitmapData->Scan0);
+		for(int j = 0; j < Height / 2; j++){
+			for(int i = 0; i < Width / 2; i++){
+				int idx = j * Width / 2 + i;
+				if(prevImgArr[idx] != imgArr[idx]){
+					pixels[idx] = {0, 0, imgArr[idx], 0};	
+					prevImgArr[idx] = imgArr[idx];
+					cnt++;
+				}
+				else
+					pixels[idx] = {imgArr[idx], imgArr[idx], imgArr[idx], 0};
+			}
+		}
+
+		bitmap.UnlockBits(bitmapData);
+		delete(bitmapData);
+
 		CLSID clsid;
 		GetEncoderClsid(L"image/jpeg", &clsid);
-		if(save)
-			bitmap.Save(filename, &clsid, NULL);
+		if(save || cnt > Width/2 * Height/2 * 0.01){
+			sprintf(buf, "%s(origin).jpeg", filename);
+			ConvertCtoWC(buf, WCbuf);
+			origin.Save(WCbuf, &clsid, NULL);
+			sprintf(buf, "%s.jpeg", filename);
+			ConvertCtoWC(buf, WCbuf);
+			bitmap.Save(WCbuf, &clsid, NULL);
+		}
 		DeleteObject(memdc);
 		DeleteObject(membit);
 		::ReleaseDC(0,scrdc);
 	}
 	GdiplusShutdown(gdiplusToken);
+
+	if(save || cnt > Width/2 * Height/2 * 0.01)return true;
+	return false;
 }
 
 int GetEncoderClsid(const WCHAR* format, CLSID* pClsid){
@@ -142,26 +202,4 @@ int GetEncoderClsid(const WCHAR* format, CLSID* pClsid){
 
 	free(pImageCodecInfo);
 	return 0;
-}
-
-void BitmapGrayscale(Gdiplus::Bitmap* bitmap){
-	using namespace Gdiplus;
-	auto *bitmapData = new BitmapData;
-	Rect rect(0, 0, Width, Height);
-	bitmap->LockBits(&rect, 3, PixelFormat32bppARGB, bitmapData);
-
-	pixelARGB *pixels = (pixelARGB *)(bitmapData->Scan0);
-	pixelARGB pixel;
-
-	for(int j = 0; j < Height; j++){
-		for(int i = 0; i < Width; i++){
-			int idx = (j * Width) + i;
-			pixel = pixels[idx];
-			BYTE Y = BYTE_CHK(0.2126 * pixel.R + 0.7152 * pixel.G + 0.0722 * pixel.B);
-			pixels[idx] = {Y, Y, Y, 0};
-		}
-	}
-
-	bitmap->UnlockBits(bitmapData);
-	free(bitmapData);
 }

@@ -2,6 +2,7 @@
 #include <ctime>
 #include <cstring>
 #include <utility>
+#include <stack>
 #include <windows.h>
 #include <direct.h>
 #include <gdiplus.h>
@@ -9,6 +10,7 @@
 #pragma comment(lib,"gdiplus")
 
 #define BYTE_CHK(n) (n<0?0:(n>=256?255:n))
+#define absDiff(a,b) (a>b?a-b:b-a)
 
 using namespace std;
 #pragma pack(push, 1)
@@ -22,14 +24,16 @@ typedef struct PIXEL_ARGB{
 
 int Height = GetSystemMetrics(SM_CYSCREEN);
 int Width = GetSystemMetrics(SM_CXSCREEN);
+int resizeHeight = Height/2;
+int resizeWidth = Width/2;
 	
 bool dirExists(const string& dirName_in);
 void ConvertCtoWC(const char *str, wchar_t *wstr);
 int GetEncoderClsid(const WCHAR* format, CLSID* pClsid);
-bool gdiscreen(const char* filename, bool save);
+bool gdiscreen(const char* filename, bool maximum, bool minimum);
+int bfs();
 
-BYTE* imgArr;
-BYTE* prevImgArr;
+BYTE *imgArr, *prevImgArr, *diffImgArr;
 
 int main(int argc, char* argv[]){
 	AllocConsole();//init concole
@@ -37,8 +41,10 @@ int main(int argc, char* argv[]){
 	freopen("CONOUT$", "w", stdout);
 	freopen("CONOUT$", "w", stderr);
 
-	imgArr = new BYTE[(Width/2) * (Height/2)];
-	prevImgArr = new BYTE[(Width/2) * (Height/2)];
+	imgArr = new BYTE[resizeWidth * resizeHeight];
+	prevImgArr = new BYTE[resizeWidth * resizeHeight];
+	diffImgArr = new BYTE[resizeWidth * resizeHeight];
+	memset(prevImgArr, 0, sizeof(BYTE) * resizeWidth * resizeHeight);
 
 	char filename[128];
 	char foldername[128];
@@ -47,7 +53,7 @@ int main(int argc, char* argv[]){
 	time_t curr_time;
 	time_t prev_time = 0;
 	struct tm *curr_tm, *tmp_tm;
-	int saveDelay = 5;//sec
+	int maximumSaveDelay = 10, minimumSaveDelay = 3;//sec
 	int deleteDelay = 3;//day
 
 	sprintf(buf,"%s\\..\\screenCapture", argv[0]);
@@ -66,12 +72,15 @@ int main(int argc, char* argv[]){
 			time_t tmp_time = curr_time - 86400 * deleteDelay;
 			tmp_tm = localtime(&tmp_time);
 			strftime(foldername, sizeof(foldername), "%y%m%d", tmp_tm);
-			sprintf(buf, "rmdir /s /q %s\\%s", path, foldername);//delete directory
-			system(buf);
+			sprintf(buf, "%s\\%s", path, foldername);
+			if(dirExists(buf)){
+				sprintf(buf, "rmdir /s /q %s\\%s", path, foldername);//delete directory
+				system(buf);
+			}
 		}
 		strftime(filename, sizeof(filename), "%H-%M-%S", curr_tm);
 		sprintf(buf, "%s\\%s\\%s", path, foldername, filename);
-		if(gdiscreen(buf, difftime(curr_time, prev_time) >= saveDelay))
+		if(gdiscreen(buf, difftime(curr_time, prev_time) >= maximumSaveDelay, difftime(curr_time, prev_time) >= minimumSaveDelay))
 			time(&prev_time);
 	}
 
@@ -96,11 +105,11 @@ bool dirExists(const string& dirName_in){
 	return false;		// this is not a directory!
 }
 
-bool gdiscreen(const char* filename, bool save){
+bool gdiscreen(const char* filename, bool maximum, bool minimum){
 	using namespace Gdiplus;
 	char buf[256];
 	wchar_t WCbuf[256];
-	int cnt = 0;
+	bool save = false;
 	GdiplusStartupInput gdiplusStartupInput;
 	ULONG_PTR gdiplusToken;
 	GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
@@ -114,7 +123,7 @@ bool gdiscreen(const char* filename, bool save){
 		BitBlt(memdc, 0, 0, Width, Height, scrdc, 0, 0, SRCCOPY);
 
 		Bitmap origin(membit, NULL);
-		Bitmap bitmap(Width/2, Height/2, PixelFormat32bppARGB);
+		Bitmap bitmap(resizeWidth, resizeHeight, PixelFormat32bppARGB);
 
 		//grayscale		
 		auto *bitmapData = new BitmapData;
@@ -127,41 +136,40 @@ bool gdiscreen(const char* filename, bool save){
 		for(int j = 0; j < Height; j += 2){
 			for(int i = 0; i < Width; i += 2){
 				pixel = pixels[j * Width + i];
-				imgArr[(j * Width / 2 + i) / 2] = BYTE_CHK(0.2126 * pixel.R + 0.7152 * pixel.G + 0.0722 * pixel.B);
+				imgArr[(j * resizeWidth + i) / 2] = BYTE_CHK(0.2126 * pixel.R + 0.7152 * pixel.G + 0.0722 * pixel.B);
 			}
 		}
 
 		bitmap.UnlockBits(bitmapData);
 
-		Rect arrRect(0, 0, Width/2, Height/2);
+		Rect arrRect(0, 0, resizeWidth, resizeHeight);
 		bitmap.LockBits(&arrRect, ImageLockModeWrite, PixelFormat32bppARGB, bitmapData);
 
 		pixels = (pixelARGB *)(bitmapData->Scan0);
-		for(int j = 0; j < Height / 2; j++){
-			for(int i = 0; i < Width / 2; i++){
-				int idx = j * Width / 2 + i;
-				if(prevImgArr[idx] != imgArr[idx]){
-					pixels[idx] = {0, 0, imgArr[idx], 0};	
-					prevImgArr[idx] = imgArr[idx];
-					cnt++;
-				}
-				else
-					pixels[idx] = {imgArr[idx], imgArr[idx], imgArr[idx], 0};
+		for(int j = 0; j < resizeHeight; j++){
+			for(int i = 0; i < resizeWidth ; i++){
+				int idx = j * resizeWidth + i;
+				diffImgArr[idx] = absDiff(imgArr[idx], prevImgArr[idx]);
+				pixels[idx] = {diffImgArr[idx], diffImgArr[idx], diffImgArr[idx], 0};
+				prevImgArr[idx] = imgArr[idx];
 			}
 		}
+		
+		int maxSize = bfs();
 
 		bitmap.UnlockBits(bitmapData);
 		delete(bitmapData);
-
-		CLSID clsid;
-		GetEncoderClsid(L"image/jpeg", &clsid);
-		if(save || cnt > Width/2 * Height/2 * 0.01){
+		
+		if(minimum && (maximum || maxSize > resizeWidth * resizeHeight * 0.01)){
+			CLSID clsid;
+			GetEncoderClsid(L"image/jpeg", &clsid);
 			sprintf(buf, "%s(origin).jpeg", filename);
 			ConvertCtoWC(buf, WCbuf);
 			origin.Save(WCbuf, &clsid, NULL);
 			sprintf(buf, "%s.jpeg", filename);
 			ConvertCtoWC(buf, WCbuf);
 			bitmap.Save(WCbuf, &clsid, NULL);
+			save = true;
 		}
 		DeleteObject(memdc);
 		DeleteObject(membit);
@@ -169,8 +177,7 @@ bool gdiscreen(const char* filename, bool save){
 	}
 	GdiplusShutdown(gdiplusToken);
 
-	if(save || cnt > Width/2 * Height/2 * 0.01)return true;
-	return false;
+	return save;
 }
 
 int GetEncoderClsid(const WCHAR* format, CLSID* pClsid){
@@ -202,4 +209,51 @@ int GetEncoderClsid(const WCHAR* format, CLSID* pClsid){
 
 	free(pImageCodecInfo);
 	return 0;
+}
+
+int bfs(){
+	int *arr = new int[resizeHeight * resizeWidth];
+	int cnt = 0, size, maxSize = 0;
+	memset(arr, 0, sizeof(BYTE) * resizeHeight * resizeWidth);
+	stack<int> s;
+	for(int j = 0;j < resizeHeight; j++){
+		for(int i = 0;i < resizeWidth; i++){
+			int idx = j * resizeWidth + i;
+			if(arr[idx] == 0){
+				if(diffImgArr[idx] == 0){
+					arr[idx] = -1;
+					continue;	
+				}
+				size = 0;
+				arr[idx] = ++cnt;
+				s.push(idx);
+				while(!s.empty()){
+					idx = s.top();
+					s.pop();
+					if(diffImgArr[idx] == 0)continue;
+					size++;
+					if(idx >= 1 && arr[idx - 1] == 0){
+						arr[idx - 1] = cnt;
+						s.push(idx - 1);
+					}
+					if(idx + 1 < resizeHeight * resizeWidth && arr[idx + 1] == 0){
+						arr[idx + 1] = cnt;
+						s.push(idx + 1);
+					}
+					if(idx >= resizeWidth && arr[idx - resizeWidth] == 0){
+						arr[idx - resizeWidth] = cnt;
+						s.push(idx - resizeWidth);
+					}
+					if(idx + resizeWidth < resizeHeight * resizeWidth && arr[idx + resizeWidth] == 0){
+						arr[idx + resizeWidth] = cnt;
+						s.push(idx + resizeWidth);
+					}
+				}
+				if(maxSize < size)
+					maxSize = size;
+				return maxSize;
+			}
+		}
+	}
+	return maxSize;
 }

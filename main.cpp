@@ -3,6 +3,7 @@
 #include <cstring>
 #include <utility>
 #include <stack>
+#include <map>
 #include <windows.h>
 #include <direct.h>
 #include <gdiplus.h>
@@ -22,24 +23,33 @@ typedef struct PIXEL_ARGB{
 }pixelARGB;
 #pragma pack(pop)
 
+enum Command{
+	CMD_HELP = 1,
+	CMD_QUIT,
+	CMD_SETDELAY,
+};
+
+static map <string, int> m;
+
 int Height = GetSystemMetrics(SM_CYSCREEN);
 int Width = GetSystemMetrics(SM_CXSCREEN);
 int resizeHeight = Height/2;
 int resizeWidth = Width/2;
-	
+int maximumSaveDelay = 10, minimumSaveDelay = 3;//sec
+int deleteDelay = 3;//day
+
+void init();	
 bool dirExists(const string& dirName_in);
 void ConvertCtoWC(const char *str, wchar_t *wstr);
 int GetEncoderClsid(const WCHAR* format, CLSID* pClsid);
 bool gdiscreen(const char* filename, bool maximum, bool minimum);
+int keyboardInput();
 int bfs();
 
 BYTE *imgArr, *prevImgArr, *diffImgArr;
 
 int main(int argc, char* argv[]){
-	AllocConsole();//init concole
-	freopen("CONIN$", "r", stdin);
-	freopen("CONOUT$", "w", stdout);
-	freopen("CONOUT$", "w", stderr);
+	init();
 
 	imgArr = new BYTE[resizeWidth * resizeHeight];
 	prevImgArr = new BYTE[resizeWidth * resizeHeight];
@@ -53,15 +63,21 @@ int main(int argc, char* argv[]){
 	time_t curr_time;
 	time_t prev_time = 0;
 	struct tm *curr_tm, *tmp_tm;
-	int maximumSaveDelay = 10, minimumSaveDelay = 3;//sec
-	int deleteDelay = 3;//day
+	int key = 0;
 
 	sprintf(buf,"%s\\..\\screenCapture", argv[0]);
 	_fullpath(path, buf, sizeof(path));
 
 	if(!dirExists(path))
 		mkdir(path);
+
 	while(true){
+		if(GetAsyncKeyState(VK_RETURN)&0X0001){
+			key = keyboardInput();
+			if(key == CMD_QUIT)
+				break;
+		}
+
 		time(&curr_time);
 		curr_tm = localtime(&curr_time);
 		strftime(foldername, sizeof(foldername), "%y%m%d", curr_tm);
@@ -151,7 +167,7 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 				int idx = j * resizeWidth + i;
 				diffImgArr[idx] = absDiff(imgArr[idx], prevImgArr[idx]);
 				pixels[idx] = {diffImgArr[idx], diffImgArr[idx], diffImgArr[idx], 0};
-				prevImgArr[idx] = imgArr[idx];
+				prevImgArr[idx] = prevImgArr[idx] * (1 - 0.1) + imgArr[idx] * 0.1;
 			}
 		}
 		
@@ -211,6 +227,62 @@ int GetEncoderClsid(const WCHAR* format, CLSID* pClsid){
 	return 0;
 }
 
+void init(){
+	m["help"] = CMD_HELP;
+	m["quit"] = CMD_QUIT;
+	m["setDelay"] = CMD_SETDELAY;
+
+	AllocConsole();//init concole
+	freopen("CONIN$", "r", stdin);
+	freopen("CONOUT$", "w", stdout);
+	freopen("CONOUT$", "w", stderr);
+}
+
+int keyboardInput(){
+	char input[256];
+	char buf[256];
+	cin.getline(input, sizeof(input));
+	int inputIdx, bufIdx;
+	int ret = 0;
+	for(bufIdx = 0 ,inputIdx = 0;input[inputIdx] != ' ' && input[inputIdx] != '\n'; inputIdx++, bufIdx++)
+		buf[bufIdx] = input[inputIdx];
+	buf[bufIdx] = '\0';
+	cout << "buf : " << buf << endl;
+	switch(m[buf]){
+		default:
+			printf("command not found\n");
+		case CMD_HELP:
+			printf("help : show command\nquit : quit program\nsetDelay 0 0 : set minimum, maximum save delay\n");
+			ret = CMD_HELP;
+			break;
+		case CMD_QUIT:
+			ret = CMD_QUIT;
+			break;
+		case CMD_SETDELAY:
+			for(bufIdx = 0, inputIdx++; input[inputIdx] != ' '; inputIdx++, bufIdx++)
+				buf[bufIdx] = input[inputIdx];
+			buf[bufIdx] = '\0';
+			int minimum = atoi(buf);
+			for(bufIdx = 0, inputIdx++; input[inputIdx] != ' '; inputIdx++, bufIdx++)
+				buf[bufIdx] = input[inputIdx];
+			buf[bufIdx] = '\0';
+			int maximum = atoi(buf);
+			if(minimum > maximum){
+				printf("error : minimumSaveDelay > maximumSaveDelay\n");
+			}
+			else{
+				if(minimum)	
+					minimumSaveDelay = minimum;
+				if(maximum)
+					maximumSaveDelay = maximum;
+			}
+			ret = CMD_SETDELAY;
+			break;
+	}
+	cin.clear();
+	return ret;
+}
+
 int bfs(){
 	int *arr = new int[resizeHeight * resizeWidth];
 	int cnt = 0, size, maxSize = 0;
@@ -220,7 +292,7 @@ int bfs(){
 		for(int i = 0;i < resizeWidth; i++){
 			int idx = j * resizeWidth + i;
 			if(arr[idx] == 0){
-				if(diffImgArr[idx] == 0){
+				if(diffImgArr[idx] < 10){
 					arr[idx] = -1;
 					continue;	
 				}
@@ -230,7 +302,7 @@ int bfs(){
 				while(!s.empty()){
 					idx = s.top();
 					s.pop();
-					if(diffImgArr[idx] == 0)continue;
+					if(diffImgArr[idx] < 10)continue;
 					size++;
 					if(idx >= 1 && arr[idx - 1] == 0){
 						arr[idx - 1] = cnt;

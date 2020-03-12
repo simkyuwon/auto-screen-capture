@@ -17,8 +17,7 @@
 
 #define BYTE_CHK(n) (BYTE)((n)<0?0:((n)>=256?255:(n)))
 #define RATE_CHK(n) ((n)<0?0:((n)>1?1:(n)))
-
-#define sqrt3 1.73205080
+#define SQRT(n) ((n)?sqrt(n):0)
 
 using namespace std;
 #pragma pack(push, 1)
@@ -56,10 +55,20 @@ enum Command{
 
 static map <string, int> cmd;
 
-int gaussianFilter[3][3] ={
-{1, 2, 1},
-{2, 4, 2},
-{1, 2, 1}};
+int gaussianFilter[5][5] = {
+{1, 4, 6, 4, 1},
+{4, 16, 24, 16, 4},
+{6, 24, 36, 24, 6},
+{4, 16, 24, 16, 4},
+{1, 4, 6, 4, 1}};
+
+int sobelMask[2][3][3] = {
+{{-1, 0, 1},
+{-2, 0, 2},
+{-1, 0, 1}},
+{{1, 2, 1},
+{0, 0, 0,},
+{-1, -2, -1}}};
 
 Gdiplus::GdiplusStartupInput gdiplusStartupInput;
 ULONG_PTR gdiplusToken;
@@ -72,12 +81,12 @@ int Height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 int Width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
 int resizeHeight = Height/2;
 int resizeWidth = Width/2;
-int maximumSaveDelay = 60, minimumSaveDelay = 5;//sec
-int timerDelay = 20;//fps
+int maximumSaveDelay = 180, minimumSaveDelay = 10;//sec
+int timerDelay = 5;//fps
 int deleteDelay = 3;//day
 int alarmDelay = 180;
 int alarmTimer;
-double referenceVal = 0.003;
+double referenceVal = 0.001;
 double referenceRate = 0.01;
 double sensitivity = 0.1;
 char path[128];
@@ -148,11 +157,11 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 	char buf[256];
 	wchar_t WCbuf[256];
 	bool save = false;
-	double *edgeArr;
-	pixelARGB *imgArr;
+	BYTE *imgArr, *grayArr, *edgeArr;
 
-	imgArr = new pixelARGB[resizeWidth * resizeHeight];
-	edgeArr = new double[resizeWidth * resizeHeight];
+	imgArr = new BYTE[resizeWidth * resizeHeight];
+	grayArr = new BYTE[Width * Height];
+	edgeArr = new BYTE[resizeWidth * resizeHeight];
 	{
 		HDC scrdc, memdc;
 		HBITMAP membit;
@@ -170,36 +179,48 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 		origin->LockBits(&rect, ImageLockModeRead, PixelFormat32bppARGB, bitmapData);
 
 		pixelARGB *pixels = (pixelARGB *)(bitmapData->Scan0);
-		for(int j = 0; j < Height; j += 2){//gaussian filter
-			for(int i = 0; i < Width; i += 2){
+
+		for(int j = 0;j < Height; j++){//grayscale
+			for(int i = 0;i < Width; i++){
 				int idx = j * Width + i;
-				int B = 0, G = 0, R = 0, cnt = 0;
-				for(int y = (j?0:1); y <= (j+1>=Height?1:2); y++){
-					for(int x = (i?0:1); x <= (i+1>=Width?1:2); x++){
-						cnt += gaussianFilter[y][x];
-						B += pixels[idx + (y - 1) * Width + (x - 1)].B * gaussianFilter[y][x];
-						G += pixels[idx + (y - 1) * Width + (x - 1)].G * gaussianFilter[y][x];
-						R += pixels[idx + (y - 1) * Width + (x - 1)].R * gaussianFilter[y][x];
-					}
-				}
-				imgArr[(j * resizeWidth + i) / 2] = {BYTE_CHK(B / cnt), BYTE_CHK(G / cnt), BYTE_CHK(R / cnt), 0};
+				grayArr[idx] = BYTE_CHK(0.2126 * pixels[idx].R + 0.7152 * pixels[idx].G + 0.0722 * pixels[idx].B);
 			}
 		}
 
+		for(int j = 0; j < Height; j += 2){//gaussian filter
+			for(int i = 0; i < Width; i += 2){
+				int idx = j * Width + i;
+				int Y = 0, cnt = 0;
+				for(int y = (j>1?0:(2-j)); y <= (j+2>=Height?(Height-j+1):4); y++){
+					for(int x = (i>1?0:(2-i)); x <= (i+2>=Width?(Width-i+1):4); x++){
+						int filterIdx = idx + (y - 2) * Width + (x - 2);
+						cnt += gaussianFilter[y][x];
+						Y += grayArr[filterIdx] * gaussianFilter[y][x];
+					}
+				}
+				imgArr[(j * resizeWidth + i) / 2] = BYTE_CHK(Y / cnt);
+			}
+		}
+		
 		origin->UnlockBits(bitmapData);
 
 		Rect arrRect(0, 0, resizeWidth, resizeHeight);
 		bitmap->LockBits(&arrRect, ImageLockModeWrite, PixelFormat32bppARGB, bitmapData);
 		pixels = (pixelARGB *)(bitmapData->Scan0);
 
-		for(int j = 0; j < resizeHeight; j++){//edge detection
-			for(int i = 0; i < resizeWidth ; i++){
+		for(int j = 1; j < resizeHeight - 1; j++){//edge detection
+			for(int i = 1; i < resizeWidth - 1; i++){
 				int idx = j * resizeWidth + i;
-				edgeArr[idx] = max(
-					i + 1 < resizeWidth?absDiff(imgArr[idx], imgArr[idx + 1]):0,
-				max(j + 1 < resizeHeight?absDiff(imgArr[idx], imgArr[idx + resizeWidth]):0,
-					i + 1 < resizeWidth && j + 1 < resizeHeight?absDiff(imgArr[idx], imgArr[idx + resizeWidth + 1]):0));
-				edgeArr[idx] /= sqrt3;
+				edgeArr[idx] = 0;
+				int sobelX = 0, sobelY = 0;
+				for(int y = 0; y < 3; y++){
+					for(int x = 0; x < 3; x++){
+						int maskIdx = idx + (y - 1) * resizeWidth + (x - 1);
+						sobelX += sobelMask[0][y][x] * imgArr[maskIdx];
+						sobelY += sobelMask[1][y][x] * imgArr[maskIdx];
+					}
+				}
+				edgeArr[idx] = BYTE_CHK(SQRT(sobelX * sobelX + sobelY * sobelY) / 5.6);
 				if(debug)
 					pixels[idx] = {BYTE_CHK(edgeArr[idx]), 0, 0, 0};
 			}
@@ -296,6 +317,7 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 		::ReleaseDC(NULL, scrdc);
 	}
 
+	delete []grayArr;
 	delete []imgArr;
 	delete []edgeArr;
 	

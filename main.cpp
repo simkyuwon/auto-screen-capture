@@ -10,12 +10,15 @@
 #include <direct.h>
 #include <gdiplus.h>
 #include <process.h>
+#include <mmsystem.h>
 
 #pragma comment(lib,"gdiplus")
+#pragma comment(lib,"winmm.lib")
 
-#define BYTE_CHK(n) ((n)<0?0:((n)>=256?255:(n)))
+#define BYTE_CHK(n) (BYTE)((n)<0?0:((n)>=256?255:(n)))
 #define RATE_CHK(n) ((n)<0?0:((n)>1?1:(n)))
-#define absDiff(a,b) (a>b?a-b:b-a)
+
+#define sqrt3 1.73205080
 
 using namespace std;
 #pragma pack(push, 1)
@@ -53,6 +56,11 @@ enum Command{
 
 static map <string, int> cmd;
 
+int gaussianFilter[3][3] ={
+{1, 2, 1},
+{2, 4, 2},
+{1, 2, 1}};
+
 Gdiplus::GdiplusStartupInput gdiplusStartupInput;
 ULONG_PTR gdiplusToken;
 CLSID clsid;
@@ -68,15 +76,15 @@ int maximumSaveDelay = 60, minimumSaveDelay = 5;//sec
 int timerDelay = 20;//fps
 int deleteDelay = 3;//day
 int alarmDelay = 180;
-int alarmTimer = 0;
-double referenceVal = 0.001;
-double referenceRate = 0.05;
-double sensitivity = 0.5;
+int alarmTimer;
+double referenceVal = 0.003;
+double referenceRate = 0.01;
+double sensitivity = 0.1;
 char path[128];
 time_t prev_time = 0;
 bool debug = false;
 BYTE flags = 0x00;
-int sectionSize = 5;
+int sectionSize = 10;
 edgeVar *edgeVarArr;
 char *exePath;
 
@@ -90,6 +98,7 @@ int GetEncoderClsid(const WCHAR* format, CLSID* pClsid);
 bool gdiscreen(const char* filename, bool maximum, bool minimum);
 unsigned int WINAPI keyboardInput(void *args);
 HWND GetConsoleHwnd(void);
+double absDiff(pixelARGB A, pixelARGB B);
 
 int main(int argc, char* argv[]){
 	char buf[256];
@@ -112,6 +121,7 @@ int main(int argc, char* argv[]){
 	KillTimer(NULL, 0);
 
 	delete []edgeVarArr;
+	delete []exePath;
 
 	Gdiplus::GdiplusShutdown(gdiplusToken);
 
@@ -138,12 +148,11 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 	char buf[256];
 	wchar_t WCbuf[256];
 	bool save = false;
-	BYTE *imgArr, *edgeArr;
+	double *edgeArr;
+	pixelARGB *imgArr;
 
-	imgArr = new BYTE[resizeWidth * resizeHeight];
-	edgeArr = new BYTE[resizeWidth * resizeHeight];
-	memset(edgeArr, 0, sizeof(BYTE) * resizeWidth * resizeHeight);
-
+	imgArr = new pixelARGB[resizeWidth * resizeHeight];
+	edgeArr = new double[resizeWidth * resizeHeight];
 	{
 		HDC scrdc, memdc;
 		HBITMAP membit;
@@ -156,18 +165,24 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 		Bitmap *origin = new Bitmap(membit, NULL);
 		Bitmap *bitmap = new Bitmap(resizeWidth, resizeHeight, PixelFormat32bppARGB);
 
-		//grayscale		
 		BitmapData *bitmapData = new BitmapData;
 		Rect rect(0, 0, Width, Height);
 		origin->LockBits(&rect, ImageLockModeRead, PixelFormat32bppARGB, bitmapData);
 
 		pixelARGB *pixels = (pixelARGB *)(bitmapData->Scan0);
-		pixelARGB pixel;
-
-		for(int j = 0; j < Height; j += 2){
+		for(int j = 0; j < Height; j += 2){//gaussian filter
 			for(int i = 0; i < Width; i += 2){
-				pixel = pixels[j * Width + i];
-				imgArr[(j * resizeWidth + i) / 2] = BYTE_CHK(0.2126 * pixel.R + 0.7152 * pixel.G + 0.0722 * pixel.B);
+				int idx = j * Width + i;
+				int B = 0, G = 0, R = 0, cnt = 0;
+				for(int y = (j?0:1); y <= (j+1>=Height?1:2); y++){
+					for(int x = (i?0:1); x <= (i+1>=Width?1:2); x++){
+						cnt += gaussianFilter[y][x];
+						B += pixels[idx + (y - 1) * Width + (x - 1)].B * gaussianFilter[y][x];
+						G += pixels[idx + (y - 1) * Width + (x - 1)].G * gaussianFilter[y][x];
+						R += pixels[idx + (y - 1) * Width + (x - 1)].R * gaussianFilter[y][x];
+					}
+				}
+				imgArr[(j * resizeWidth + i) / 2] = {BYTE_CHK(B / cnt), BYTE_CHK(G / cnt), BYTE_CHK(R / cnt), 0};
 			}
 		}
 
@@ -176,32 +191,30 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 		Rect arrRect(0, 0, resizeWidth, resizeHeight);
 		bitmap->LockBits(&arrRect, ImageLockModeWrite, PixelFormat32bppARGB, bitmapData);
 		pixels = (pixelARGB *)(bitmapData->Scan0);
-		for(int j = 0; j < resizeHeight; j++){
+
+		for(int j = 0; j < resizeHeight; j++){//edge detection
 			for(int i = 0; i < resizeWidth ; i++){
 				int idx = j * resizeWidth + i;
-				edgeArr[idx] = 0;
-				if(i + 1 < resizeWidth) edgeArr[idx] = absDiff(imgArr[idx], imgArr[idx + 1]);
-				if(j + 1 < resizeHeight){
-					BYTE tmp = absDiff(imgArr[idx], imgArr[idx + resizeWidth]);
-					if(tmp > edgeArr[idx])edgeArr[idx] = tmp;
-					if(i + 1 < resizeWidth){
-						tmp = absDiff(imgArr[idx], imgArr[idx + resizeWidth + 1]);
-						if(tmp > edgeArr[idx]) edgeArr[idx] = tmp;
-					}
-				}
-				pixels[idx] = {edgeArr[idx], 0, 0, 0};
+				edgeArr[idx] = max(
+					i + 1 < resizeWidth?absDiff(imgArr[idx], imgArr[idx + 1]):0,
+				max(j + 1 < resizeHeight?absDiff(imgArr[idx], imgArr[idx + resizeWidth]):0,
+					i + 1 < resizeWidth && j + 1 < resizeHeight?absDiff(imgArr[idx], imgArr[idx + resizeWidth + 1]):0));
+				edgeArr[idx] /= sqrt3;
+				if(debug)
+					pixels[idx] = {BYTE_CHK(edgeArr[idx]), 0, 0, 0};
 			}
 		}
 
 		double rate = 0;
 		int sectionW, sectionH = sectionSize;
-		for(int j = 0, avgJ = 0; j < resizeHeight; j += sectionSize, avgJ++){
+		for(int j = 0; j < resizeHeight; j += sectionSize){//change detection
 			if(j + sectionSize >= resizeHeight)
 				sectionH = resizeHeight - j;
-			sectionW = sectionSize;
-			for(int i = 0, avgI = 0; i < resizeWidth; i += sectionSize, avgI++){
+			for(int i = 0; i < resizeWidth; i += sectionSize){
 				if(i + sectionSize >= resizeWidth)
 					sectionW = resizeWidth - i;
+				else
+					sectionW = sectionSize;
 				int idx = j * resizeWidth + i;
 				double avg = 0;
 				for(int y = 0; y < sectionH; y++){
@@ -210,7 +223,7 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 					}
 				}
 				avg /= sectionH*sectionW;
-				int edgeIdx = avgJ * (resizeWidth / sectionSize + (resizeWidth % sectionSize?1:0)) + avgI;
+				int edgeIdx = (j / sectionSize) * (resizeWidth / sectionSize + (resizeWidth % sectionSize?1:0)) + (i / sectionSize);
 				edgeVarArr[edgeIdx].avg.push(avg);
 				edgeVarArr[edgeIdx].sum += avg;
 				edgeVarArr[edgeIdx].expsum += avg * avg;
@@ -220,18 +233,22 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 					edgeVarArr[edgeIdx].expsum -= popAvg * popAvg;
 					edgeVarArr[edgeIdx].avg.pop();
 				}
-				double edgeS = edgeVarArr[edgeIdx].expsum / edgeVarArr[edgeIdx].avg.size() - pow(edgeVarArr[edgeIdx].sum / edgeVarArr[edgeIdx].avg.size(),2);
-				if(edgeS > 0)edgeS = sqrt(edgeS);
 
-				edgeS = edgeS*2/255;
+				double edgeS = edgeVarArr[edgeIdx].expsum / edgeVarArr[edgeIdx].avg.size() - pow(edgeVarArr[edgeIdx].sum / edgeVarArr[edgeIdx].avg.size(), 2);
+				if(edgeS > 0){
+					edgeS = sqrt(edgeS);
+					edgeS = (edgeS * 2) / 255;
+				}
 
 				if(edgeS > edgeVarArr[edgeIdx].ref + referenceVal)
 					rate += sectionW * sectionH;
 
-				for(int y = 0; y < sectionH; y++){
-					for(int x = 0; x < sectionW; x++){
-						pixels[idx + y * resizeWidth + x].R = (BYTE)BYTE_CHK(avg);
-						pixels[idx + y * resizeWidth + x].G = (edgeS > edgeVarArr[edgeIdx].ref + referenceVal)?128:0;
+				if(debug){
+					for(int y = 0; y < sectionH; y++){
+						for(int x = 0; x < sectionW; x++){
+							pixels[idx + y * resizeWidth + x].R = BYTE_CHK(avg);
+							pixels[idx + y * resizeWidth + x].G = (edgeS > edgeVarArr[edgeIdx].ref + referenceVal)?128:0;
+						}
 					}
 				}
 				edgeVarArr[edgeIdx].ref = edgeVarArr[edgeIdx].ref * (1 - sensitivity) + edgeS * sensitivity;
@@ -251,7 +268,8 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 			if(flags & 0x01){
 				sprintf(buf, "%s(event).jpeg", filename);
 				if(!(flags & 0x40)){
-					MessageBox(NULL, "change detection", "autoScreenCapture", MB_OK | MB_ICONASTERISK);
+					PlaySound((LPCSTR)SND_ALIAS_SYSTEMASTERISK, NULL, SND_ASYNC | SND_ALIAS_ID);
+					MessageBox(NULL, "change detection", "autoScreenCapture", MB_OK | MB_ICONASTERISK | MB_TOPMOST);
 					alarmTimer = alarmDelay * timerDelay;
 					flags |= 0x40;
 				}
@@ -340,8 +358,8 @@ void CALLBACK routine(HWND hwnd, UINT uMsg, UINT timerId, DWORD dwTime){
 		if(dirExists(buf)){
 			sprintf(buf, "rmdir /s /q %s\\%s", path, foldername);//delete directory
 			system(buf);
-			WinExec(exePath, SW_HIDE);//restart
-			PostQuitMessage(WM_QUIT);
+/*			WinExec(exePath, SW_HIDE);//restart
+			PostQuitMessage(WM_QUIT);*/
 		}
 	}
 	strftime(filename, sizeof(filename), "%H-%M-%S", curr_tm);
@@ -388,13 +406,11 @@ void init(){
 
 	GetConsoleTitle(pszOldWindowTitle, 1024);
 	
-	wsprintf(pszNewWindowTitle, "autoScreenCapture_tmp");
-
-	SetConsoleTitle(pszNewWindowTitle);
+	SetConsoleTitle("autoScreenCapture_tmp");
 	
 	Sleep(40);
 
-	for(hwndFound = FindWindow(NULL, pszOldWindowTitle); hwndFound != NULL; hwndFound = FindWindow(NULL, pszOldWindowTitle)){
+	for(hwndFound = FindWindow(NULL, pszOldWindowTitle); hwndFound != NULL; hwndFound = FindWindow(NULL, pszOldWindowTitle)){//same program exit
 		HANDLE hProcess;
 		DWORD lpdwProcessId;
 		GetWindowThreadProcessId(hwndFound, &lpdwProcessId);
@@ -413,25 +429,28 @@ void init(){
 
 	signal(SIGABRT, exitHandler);
 
+	alarmTimer = alarmDelay * timerDelay;
+	flags |= 0x40;
+
 	hThread = (HANDLE)_beginthreadex(NULL, 0, keyboardInput, NULL, 0, (unsigned*)&threadID);
 }
 
 void initSetting(){
 	FILE *pFile;
-	char tmp = 'X';
+	char tmp = '\0';
 	pFile = fopen("setting", "r");
 	if(pFile != NULL){
 		fseek(pFile, 0, SEEK_SET);
 		if(fscanf(pFile, "%9d %9d %9d %9d %9d %lf %lf %lf %c", &timerDelay, &minimumSaveDelay, &maximumSaveDelay, &sectionSize, &alarmDelay, &referenceVal, &referenceRate, &sensitivity, &tmp) != 9){
 			fclose(pFile);
 			remove("setting");
-			tmp = 'X';
+			tmp = '\0';
 		}
 		else{
 			debug = (tmp=='T')?true:false;
 		}
 	}
-	if(tmp == 'X'){//make setting file
+	if(!tmp){//make setting file
 		pFile = fopen("setting", "w");
 		fprintf(pFile, "%9d %9d %9d %9d %9d %1.7lf %1.7lf %1.7lf F", timerDelay, minimumSaveDelay, maximumSaveDelay, sectionSize, alarmDelay, referenceVal, referenceRate, sensitivity);
 	}
@@ -445,6 +464,8 @@ unsigned int WINAPI keyboardInput(void *args){//keyboard input thread
 	while(true){
 		cin.getline(input, sizeof(input));
 		sscanf(input, "%s", buf);
+		FILE *pFile;
+		pFile = fopen("setting", "r+");
 		switch(cmd[buf]){
 			case CMD_HELP:
 				printf("help : show command\n");
@@ -470,6 +491,7 @@ unsigned int WINAPI keyboardInput(void *args){//keyboard input thread
 			case CMD_RESTART:
 				WinExec(exePath, SW_SHOW);
 			case CMD_QUIT:
+				fclose(pFile);
 				return 0;
 			case CMD_SETDELAY:{
 				int minimum, maximum;
@@ -490,11 +512,8 @@ unsigned int WINAPI keyboardInput(void *args){//keyboard input thread
 					maximumSaveDelay = maximum;
 				}
 				printf("minimumSaveDelay : %dsec, maximumSaveDelay : %dsec\n", minimum, maximum); 
-				FILE *pFile;
-				pFile = fopen("setting", "r+");
 				fseek(pFile, 10, SEEK_SET);
 				fprintf(pFile, "%9d %9d ", minimumSaveDelay, maximumSaveDelay);
-				fclose(pFile);
 				break;}
 			case CMD_SETTIMER:{
 				int timer;
@@ -509,12 +528,11 @@ unsigned int WINAPI keyboardInput(void *args){//keyboard input thread
 				alarmTimer = alarmDelay * timer / timerDelay;
 				timerDelay = timer;
 				printf("timerDelay : %dfps\n", timerDelay);
-				FILE *pFile;
-				pFile = fopen("setting", "r+");
 				fseek(pFile, 0, SEEK_SET);
 				fprintf(pFile, "%9d ", timerDelay);
 				fclose(pFile);
-				break;}
+				WinExec(exePath, SW_SHOW);
+				return 0;}
 			case CMD_SETALRM:{
 				int alarm;
 				if(sscanf(input, "%*s %d", &alarm) != 1){
@@ -526,11 +544,8 @@ unsigned int WINAPI keyboardInput(void *args){//keyboard input thread
 				alarmDelay = alarm;
 				if(alarmTimer > alarmDelay * timerDelay) alarmTimer = alarmDelay * timerDelay;
 				printf("alarmDelay : %dsec\n", alarm);
-				FILE *pFile;
-				pFile = fopen("setting", "r+");
 				fseek(pFile, 40, SEEK_SET);
 				fprintf(pFile, "%9d ", alarmDelay);
-				fclose(pFile);
 				break;}
 			case CMD_SETDEBUG:{
 				char tmp;
@@ -540,11 +555,8 @@ unsigned int WINAPI keyboardInput(void *args){//keyboard input thread
 				}
 				debug = (tmp=='T')?true:false;
 				printf("Debug : %c\n", tmp);
-				FILE *pFile;
-				pFile = fopen("setting", "r+");
 				fseek(pFile, 80, SEEK_SET);
 				fprintf(pFile, "%c", tmp);
-				fclose(pFile);	
 				break;}
 			case CMD_SETREFVAL:{
 				double refVal;
@@ -554,11 +566,8 @@ unsigned int WINAPI keyboardInput(void *args){//keyboard input thread
 				}
 				referenceVal = RATE_CHK(refVal);
 				printf("reference value : %lf\n", referenceVal);
-				FILE *pFile;
-				pFile = fopen("setting", "r+");
 				fseek(pFile, 50, SEEK_SET);
 				fprintf(pFile, "%1.7lf ", refVal);
-				fclose(pFile);	
 				break;}	
 			case CMD_SETREFRATE:{
 				double refRate;
@@ -568,11 +577,8 @@ unsigned int WINAPI keyboardInput(void *args){//keyboard input thread
 				}
 				referenceRate = RATE_CHK(refRate);
 				printf("reference Rate : %lf\n", referenceRate);
-				FILE *pFile;
-				pFile = fopen("setting", "r+");
 				fseek(pFile, 60, SEEK_SET);
 				fprintf(pFile, "%1.7lf ", refRate);
-				fclose(pFile);	
 				break;}	
 			case CMD_SETSENS:{
 				double sens;
@@ -581,13 +587,10 @@ unsigned int WINAPI keyboardInput(void *args){//keyboard input thread
 					break;
 				}
 				sensitivity = RATE_CHK(sens);
-				printf("reference Rate : %lf\n", sensitivity);
-				FILE *pFile;
-				pFile = fopen("setting", "r+");
+				printf("sensitivity : %lf\n", sensitivity);
 				fseek(pFile, 70, SEEK_SET);
 				fprintf(pFile, "%1.7lf ", sensitivity);
-				fclose(pFile);	
-				break;}	
+				break;}
 			case CMD_SETSIZE:{
 				int size;
 				if(sscanf(input, "%*s %d", &size) != 1){
@@ -598,12 +601,11 @@ unsigned int WINAPI keyboardInput(void *args){//keyboard input thread
 				else if(size > min(resizeWidth, resizeHeight))size = min(resizeWidth, resizeHeight);
 				sectionSize = size;
 				printf("section size : %d\n", sectionSize);
-				FILE *pFile;
-				pFile = fopen("setting", "r+");
 				fseek(pFile, 30, SEEK_SET);
 				fprintf(pFile, "%9d ", size);
-				fclose(pFile);	
-				break;}
+				fclose(pFile);
+				WinExec(exePath, SW_SHOW);
+				return 0;}
 			case CMD_CLEAR:
 				if(dirExists(path)){
 					char sysBuf[256];
@@ -622,18 +624,25 @@ unsigned int WINAPI keyboardInput(void *args){//keyboard input thread
 					printf("section size : %d\n", sectionSize);
 					printf("reference value : %lf\n", referenceVal);
 					printf("reference rate : %lf\n", referenceRate);
+					printf("sensitivity : %lf\n", sensitivity);
 				}
 				break;
 			default:
 				printf("command not found\nhelp : show command\n");
 				break;
 		}
+		fclose(pFile);
 	}
 }
 
-HWND GetConsoleHwnd(void)
-{
+HWND GetConsoleHwnd(void){
 	char WindowTitle[1024];
 	GetConsoleTitle(WindowTitle, 1024);
 	return FindWindow(NULL, WindowTitle);
+}
+
+double absDiff(pixelARGB A, pixelARGB B){
+	double ret = (A.R - B.R) * (A.R - B.R) + (A.G - B.G) * (A.G - B.G) + (A.B - B.B) * (A.B - B.B);
+	if(ret) ret = sqrt(ret);
+	return ret;
 }

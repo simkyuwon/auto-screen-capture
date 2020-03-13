@@ -5,7 +5,6 @@
 #include <utility>
 #include <map>
 #include <queue>
-#include <csignal>
 #include <windows.h>
 #include <direct.h>
 #include <gdiplus.h>
@@ -34,6 +33,7 @@ typedef struct EDGE_VAR{
 	double sum;
 	double expsum;
 	double ref;
+	int change;
 }edgeVar;
 
 enum Command{
@@ -86,19 +86,19 @@ int timerDelay = 5;//fps
 int deleteDelay = 3;//day
 int alarmDelay = 180;
 int alarmTimer;
-double referenceVal = 0.001;
+double referenceVal = 0.01;
 double referenceRate = 0.01;
 double sensitivity = 0.1;
 char path[128];
 time_t prev_time = 0;
 bool debug = false;
 BYTE flags = 0x00;
-int sectionSize = 10;
+int sectionSize = 5;
 edgeVar *edgeVarArr;
 char *exePath;
+int edgeVarArrSize = (resizeWidth/sectionSize + (resizeWidth%sectionSize?1:0)) * (resizeHeight/sectionSize + (resizeHeight%sectionSize?1:0));
 
 void CALLBACK routine(HWND hwnd, UINT uMsg, UINT timerId, DWORD dwTime);
-void exitHandler(int signum);
 void init();
 void initSetting();
 bool dirExists(const string& dirName_in);
@@ -107,7 +107,6 @@ int GetEncoderClsid(const WCHAR* format, CLSID* pClsid);
 bool gdiscreen(const char* filename, bool maximum, bool minimum);
 unsigned int WINAPI keyboardInput(void *args);
 HWND GetConsoleHwnd(void);
-double absDiff(pixelARGB A, pixelARGB B);
 
 int main(int argc, char* argv[]){
 	char buf[256];
@@ -220,7 +219,7 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 						sobelY += sobelMask[1][y][x] * imgArr[maskIdx];
 					}
 				}
-				edgeArr[idx] = BYTE_CHK(SQRT(sobelX * sobelX + sobelY * sobelY) / 5.6);
+				edgeArr[idx] = BYTE_CHK(SQRT(sobelX * sobelX + sobelY * sobelY) / 4);
 				if(debug)
 					pixels[idx] = {BYTE_CHK(edgeArr[idx]), 0, 0, 0};
 			}
@@ -231,11 +230,10 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 		for(int j = 0; j < resizeHeight; j += sectionSize){//change detection
 			if(j + sectionSize >= resizeHeight)
 				sectionH = resizeHeight - j;
+				sectionW = sectionSize;
 			for(int i = 0; i < resizeWidth; i += sectionSize){
 				if(i + sectionSize >= resizeWidth)
 					sectionW = resizeWidth - i;
-				else
-					sectionW = sectionSize;
 				int idx = j * resizeWidth + i;
 				double avg = 0;
 				for(int y = 0; y < sectionH; y++){
@@ -248,7 +246,7 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 				edgeVarArr[edgeIdx].avg.push(avg);
 				edgeVarArr[edgeIdx].sum += avg;
 				edgeVarArr[edgeIdx].expsum += avg * avg;
-				if(edgeVarArr[edgeIdx].avg.size() > min(minimumSaveDelay, 10) * timerDelay){
+				if(edgeVarArr[edgeIdx].avg.size() > 5 * timerDelay){
 					double popAvg = edgeVarArr[edgeIdx].avg.front();
 					edgeVarArr[edgeIdx].sum -= popAvg;
 					edgeVarArr[edgeIdx].expsum -= popAvg * popAvg;
@@ -256,30 +254,29 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 				}
 
 				double edgeS = edgeVarArr[edgeIdx].expsum / edgeVarArr[edgeIdx].avg.size() - pow(edgeVarArr[edgeIdx].sum / edgeVarArr[edgeIdx].avg.size(), 2);
-				if(edgeS > 0){
-					edgeS = sqrt(edgeS);
-					edgeS = (edgeS * 2) / 255;
-				}
+				edgeS = SQRT(edgeS) / 127.5;
 
-				if(edgeS > edgeVarArr[edgeIdx].ref + referenceVal)
+				if(edgeS > edgeVarArr[edgeIdx].ref * (1 + referenceVal)){
 					rate += sectionW * sectionH;
+					edgeVarArr[edgeIdx].change++;
+				}
 
 				if(debug){
 					for(int y = 0; y < sectionH; y++){
 						for(int x = 0; x < sectionW; x++){
 							pixels[idx + y * resizeWidth + x].R = BYTE_CHK(avg);
-							pixels[idx + y * resizeWidth + x].G = (edgeS > edgeVarArr[edgeIdx].ref + referenceVal)?128:0;
+							pixels[idx + y * resizeWidth + x].G = BYTE_CHK(edgeVarArr[edgeIdx].change * 256 / timerDelay);
 						}
 					}
 				}
-				edgeVarArr[edgeIdx].ref = edgeVarArr[edgeIdx].ref * (1 - sensitivity) + edgeS * sensitivity;
+				edgeVarArr[edgeIdx].ref = RATE_CHK(edgeVarArr[edgeIdx].ref * (1 - sensitivity) + edgeS * sensitivity);
 			}
 		}
 
 		bitmap->UnlockBits(bitmapData);
 		delete bitmapData;
 
-		if(rate/(resizeWidth * resizeHeight) > referenceRate)
+		if(rate / (resizeWidth * resizeHeight) > referenceRate)
 			flags |= 0x01;
 
 		if(maximum)
@@ -288,8 +285,8 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 		if(minimum && (flags & 0x03)){//save image
 			if(flags & 0x01){
 				sprintf(buf, "%s(event).jpeg", filename);
-				if(!(flags & 0x40)){
-					PlaySound((LPCSTR)SND_ALIAS_SYSTEMASTERISK, NULL, SND_ASYNC | SND_ALIAS_ID);
+				if(!(flags & 0x40)){//show message box
+//					PlaySound((LPCSTR)SND_ALIAS_SYSTEMASTERISK, NULL, SND_ASYNC | SND_ALIAS_ID);
 					MessageBox(NULL, "change detection", "autoScreenCapture", MB_OK | MB_ICONASTERISK | MB_TOPMOST);
 					alarmTimer = alarmDelay * timerDelay;
 					flags |= 0x40;
@@ -305,6 +302,8 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 				sprintf(buf, "%s(debug).jpeg", filename);
 				ConvertCtoWC(buf, WCbuf);
 				bitmap->Save(WCbuf, &clsid, NULL);
+				for(int i = 0; i < edgeVarArrSize; i++)
+					edgeVarArr[i].change = 0;
 			}
 			save = true;
 			flags &= 0xFC;
@@ -392,10 +391,6 @@ void CALLBACK routine(HWND hwnd, UINT uMsg, UINT timerId, DWORD dwTime){
 	flags &= 0x7F;
 }
 
-void exitHandler(int signum){
-	MessageBox(NULL, "program is terminated", "autoScreenCapture", MB_OK|MB_ICONERROR);	
-}
-
 void init(){
 	cmd["help"] = CMD_HELP;//init command map
 	cmd["quit"] = CMD_QUIT;
@@ -423,7 +418,6 @@ void init(){
 	initSetting();
 
 	HWND hwndFound;
-	char pszNewWindowTitle[1024];
 	char pszOldWindowTitle[1024];
 
 	GetConsoleTitle(pszOldWindowTitle, 1024);
@@ -445,11 +439,14 @@ void init(){
 	Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
 	GetEncoderClsid(L"image/jpeg", &clsid);
 
-	edgeVarArr = new edgeVar[(resizeWidth/sectionSize + (resizeWidth%sectionSize?1:0)) * (resizeHeight/sectionSize + (resizeHeight%sectionSize?1:0))];
+	edgeVarArr = new edgeVar[edgeVarArrSize];
+
+	for(int i = 0; i < edgeVarArrSize; i++){
+		edgeVarArr[i].ref = 0.1;
+		edgeVarArr[i].change = 0;
+	}
 
 	SetTimer(NULL, 0, (int)1000/timerDelay, (TIMERPROC)&routine);
-
-	signal(SIGABRT, exitHandler);
 
 	alarmTimer = alarmDelay * timerDelay;
 	flags |= 0x40;
@@ -661,10 +658,4 @@ HWND GetConsoleHwnd(void){
 	char WindowTitle[1024];
 	GetConsoleTitle(WindowTitle, 1024);
 	return FindWindow(NULL, WindowTitle);
-}
-
-double absDiff(pixelARGB A, pixelARGB B){
-	double ret = (A.R - B.R) * (A.R - B.R) + (A.G - B.G) * (A.G - B.G) + (A.B - B.B) * (A.B - B.B);
-	if(ret) ret = sqrt(ret);
-	return ret;
 }

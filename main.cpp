@@ -33,7 +33,7 @@ typedef struct EDGE_VAR{
 	double sum;
 	double expsum;
 	double ref;
-	int change;
+	bool change;
 }edgeVar;
 
 enum Command{
@@ -96,7 +96,7 @@ BYTE flags = 0x00;
 int sectionSize = 5;
 edgeVar *edgeVarArr;
 char *exePath;
-int edgeVarArrSize = (resizeWidth/sectionSize + (resizeWidth%sectionSize?1:0)) * (resizeHeight/sectionSize + (resizeHeight%sectionSize?1:0));
+int edgeVarArrSize;
 
 void CALLBACK routine(HWND hwnd, UINT uMsg, UINT timerId, DWORD dwTime);
 void init();
@@ -221,7 +221,7 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 				}
 				edgeArr[idx] = BYTE_CHK(SQRT(sobelX * sobelX + sobelY * sobelY) / 4);
 				if(debug)
-					pixels[idx] = {BYTE_CHK(edgeArr[idx]), 0, 0, 0};
+					pixels[idx] = {0, BYTE_CHK(edgeArr[idx]), 0, 0};
 			}
 		}
 
@@ -256,20 +256,22 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 				double edgeS = edgeVarArr[edgeIdx].expsum / edgeVarArr[edgeIdx].avg.size() - pow(edgeVarArr[edgeIdx].sum / edgeVarArr[edgeIdx].avg.size(), 2);
 				edgeS = SQRT(edgeS) / 127.5;
 
-				if(edgeS > edgeVarArr[edgeIdx].ref * (1 + referenceVal)){
+				if(edgeS > referenceVal * edgeVarArr[edgeIdx].ref){
 					rate += sectionW * sectionH;
-					edgeVarArr[edgeIdx].change++;
+					edgeVarArr[edgeIdx].change = true;
+					edgeVarArr[edgeIdx].ref = 0.1;
 				}
+				else
+					edgeVarArr[edgeIdx].ref *= 1 + sensitivity;
 
 				if(debug){
 					for(int y = 0; y < sectionH; y++){
 						for(int x = 0; x < sectionW; x++){
-							pixels[idx + y * resizeWidth + x].R = BYTE_CHK(avg);
-							pixels[idx + y * resizeWidth + x].G = BYTE_CHK(edgeVarArr[edgeIdx].change * 256 / timerDelay);
+							pixels[idx + y * resizeWidth + x].R = edgeVarArr[edgeIdx].ref==0.1?128:0;
+							pixels[idx + y * resizeWidth + x].B = edgeVarArr[edgeIdx].change?128:0;
 						}
 					}
 				}
-				edgeVarArr[edgeIdx].ref = RATE_CHK(edgeVarArr[edgeIdx].ref * (1 - sensitivity) + edgeS * sensitivity);
 			}
 		}
 
@@ -286,14 +288,16 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 			if(flags & 0x01){
 				sprintf(buf, "%s(event).jpeg", filename);
 				if(!(flags & 0x40)){//show message box
+					flags |= 0x60;
+					flags &= 0x7F;
 //					PlaySound((LPCSTR)SND_ALIAS_SYSTEMASTERISK, NULL, SND_ASYNC | SND_ALIAS_ID);
 					MessageBox(NULL, "change detection", "autoScreenCapture", MB_OK | MB_ICONASTERISK | MB_TOPMOST);
 					alarmTimer = alarmDelay * timerDelay;
-					flags |= 0x40;
+					flags &= 0xDF;
 				}
 			}
 			else{
-				if(alarmTimer == 0) flags &= 0xBF;
+				if(alarmTimer == 0 && !(flags & 0x20)) flags &= 0xBF;
 				sprintf(buf, "%s.jpeg", filename);
 			}
 			ConvertCtoWC(buf, WCbuf);
@@ -303,7 +307,7 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 				ConvertCtoWC(buf, WCbuf);
 				bitmap->Save(WCbuf, &clsid, NULL);
 				for(int i = 0; i < edgeVarArrSize; i++)
-					edgeVarArr[i].change = 0;
+					edgeVarArr[i].change = false;
 			}
 			save = true;
 			flags &= 0xFC;
@@ -417,6 +421,8 @@ void init(){
 
 	initSetting();
 
+	edgeVarArrSize = (resizeWidth/sectionSize + (resizeWidth%sectionSize?1:0)) * (resizeHeight/sectionSize + (resizeHeight%sectionSize?1:0));
+
 	HWND hwndFound;
 	char pszOldWindowTitle[1024];
 
@@ -442,8 +448,8 @@ void init(){
 	edgeVarArr = new edgeVar[edgeVarArrSize];
 
 	for(int i = 0; i < edgeVarArrSize; i++){
-		edgeVarArr[i].ref = 0.1;
-		edgeVarArr[i].change = 0;
+		edgeVarArr[i].ref = 0;
+		edgeVarArr[i].change = false;
 	}
 
 	SetTimer(NULL, 0, (int)1000/timerDelay, (TIMERPROC)&routine);
@@ -550,8 +556,9 @@ unsigned int WINAPI keyboardInput(void *args){//keyboard input thread
 				fseek(pFile, 0, SEEK_SET);
 				fprintf(pFile, "%9d ", timerDelay);
 				fclose(pFile);
-				WinExec(exePath, SW_SHOW);
-				return 0;}
+				KillTimer(NULL, 0);
+				SetTimer(NULL, 0, (int)1000/timerDelay, (TIMERPROC)&routine);
+				break;}
 			case CMD_SETALRM:{
 				int alarm;
 				if(sscanf(input, "%*s %d", &alarm) != 1){

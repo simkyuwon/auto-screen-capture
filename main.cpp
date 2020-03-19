@@ -34,6 +34,7 @@ typedef struct EDGE_VAR{
 	double expsum;
 	double ref;
 	bool change;
+	bool exception;
 }edgeVar;
 
 enum Command{
@@ -51,6 +52,10 @@ enum Command{
 	CMD_CLEAR,
 	CMD_INFO,
 	CMD_HIDE,
+	CMD_ADDEXCEPT,
+	CMD_SUBEXCEPT,
+	CMD_ON,
+	CMD_OFF,
 };
 
 static map <string, int> cmd;
@@ -95,6 +100,7 @@ bool debug = false;
 BYTE flags = 0x00;
 int sectionSize = 5;
 edgeVar *edgeVarArr;
+int edgeVarArrWidth;
 char *exePath;
 int edgeVarArrSize;
 
@@ -225,6 +231,11 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 			}
 		}
 
+		for(int j = 0; j < resizeHeight; j++)
+			edgeArr[j * resizeWidth] = edgeArr[j * resizeWidth + resizeWidth - 1] = 0;
+		for(int i = 0; i < resizeWidth; i++)
+			edgeArr[i] = edgeArr[(resizeHeight - 1) * resizeWidth + i] = 0;
+
 		double rate = 0;
 		int sectionW, sectionH = sectionSize;
 		for(int j = 0; j < resizeHeight; j += sectionSize){//change detection
@@ -242,7 +253,19 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 					}
 				}
 				avg /= sectionH*sectionW;
-				int edgeIdx = (j / sectionSize) * (resizeWidth / sectionSize + (resizeWidth % sectionSize?1:0)) + (i / sectionSize);
+				int edgeIdx = (j / sectionSize) * edgeVarArrWidth + (i / sectionSize);
+
+				if(edgeVarArr[edgeIdx].exception){
+					if(debug){
+						if(debug){
+							for(int y = 0; y < sectionH; y++)
+								for(int x = 0; x < sectionW; x++)
+									pixels[idx + y * resizeWidth + x].R = 255;
+						}
+					}
+					continue;
+				}
+
 				edgeVarArr[edgeIdx].avg.push(avg);
 				edgeVarArr[edgeIdx].sum += avg;
 				edgeVarArr[edgeIdx].expsum += avg * avg;
@@ -256,29 +279,32 @@ bool gdiscreen(const char* filename, bool maximum, bool minimum){
 				double edgeS = edgeVarArr[edgeIdx].expsum / edgeVarArr[edgeIdx].avg.size() - pow(edgeVarArr[edgeIdx].sum / edgeVarArr[edgeIdx].avg.size(), 2);
 				edgeS = SQRT(edgeS) / 127.5;
 
-				if(edgeS > referenceVal * edgeVarArr[edgeIdx].ref){
-					rate += sectionW * sectionH;
-					edgeVarArr[edgeIdx].change = true;
+				if(edgeS > referenceVal){
+					if(edgeS * edgeVarArr[edgeIdx].ref > referenceVal){
+						edgeVarArr[edgeIdx].change = true;
+						rate += sectionW * sectionH;
+						if(debug){
+							for(int y = 0; y < sectionH; y++)
+								for(int x = 0; x < sectionW; x++)
+									pixels[idx + y * resizeWidth + x].R = 128;
+						}
+					}
 					edgeVarArr[edgeIdx].ref = 0.1;
 				}
 				else
 					edgeVarArr[edgeIdx].ref *= 1 + sensitivity;
 
 				if(debug){
-					for(int y = 0; y < sectionH; y++){
-						for(int x = 0; x < sectionW; x++){
-							pixels[idx + y * resizeWidth + x].R = edgeVarArr[edgeIdx].ref==0.1?128:0;
+					for(int y = 0; y < sectionH; y++)
+						for(int x = 0; x < sectionW; x++)
 							pixels[idx + y * resizeWidth + x].B = edgeVarArr[edgeIdx].change?128:0;
-						}
-					}
 				}
 			}
 		}
-
 		bitmap->UnlockBits(bitmapData);
 		delete bitmapData;
 
-		if(rate / (resizeWidth * resizeHeight) > referenceRate)
+		if((rate / (resizeWidth * resizeHeight) > referenceRate) && !(flags & 0x10))
 			flags |= 0x01;
 
 		if(maximum)
@@ -375,7 +401,6 @@ void CALLBACK routine(HWND hwnd, UINT uMsg, UINT timerId, DWORD dwTime){
 	sprintf(buf, "%s\\%s", path, foldername);
 	if(!dirExists(buf)){
 		mkdir(buf);
-	
 		time_t tmp_time = curr_time - 86400 * deleteDelay;
 		tmp_tm = localtime(&tmp_time);
 		strftime(foldername, sizeof(foldername), "%y%m%d", tmp_tm);
@@ -410,6 +435,10 @@ void init(){
 	cmd["clear"] = CMD_CLEAR;
 	cmd["info"] = CMD_INFO;
 	cmd["hide"] = CMD_HIDE;
+	cmd["addExcept"] = CMD_ADDEXCEPT;
+	cmd["subExcept"] = CMD_SUBEXCEPT;
+	cmd["on"] = CMD_ON;
+	cmd["off"] = CMD_OFF;
 
 	if(!dirExists(path))
 		mkdir(path);
@@ -419,9 +448,17 @@ void init(){
 	freopen("CONOUT$", "w", stdout);
 	freopen("CONOUT$", "w", stderr);
 
-	initSetting();
-
 	edgeVarArrSize = (resizeWidth/sectionSize + (resizeWidth%sectionSize?1:0)) * (resizeHeight/sectionSize + (resizeHeight%sectionSize?1:0));
+	edgeVarArrWidth = (resizeWidth/sectionSize + (resizeWidth%sectionSize?1:0));
+
+	edgeVarArr = new edgeVar[edgeVarArrSize];
+
+	for(int i = 0; i < edgeVarArrSize; i++){
+		edgeVarArr[i].ref = 1;
+		edgeVarArr[i].change = false;
+	}
+
+	initSetting();
 
 	HWND hwndFound;
 	char pszOldWindowTitle[1024];
@@ -445,13 +482,6 @@ void init(){
 	Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
 	GetEncoderClsid(L"image/jpeg", &clsid);
 
-	edgeVarArr = new edgeVar[edgeVarArrSize];
-
-	for(int i = 0; i < edgeVarArrSize; i++){
-		edgeVarArr[i].ref = 0;
-		edgeVarArr[i].change = false;
-	}
-
 	SetTimer(NULL, 0, (int)1000/timerDelay, (TIMERPROC)&routine);
 
 	alarmTimer = alarmDelay * timerDelay;
@@ -462,6 +492,7 @@ void init(){
 
 void initSetting(){
 	FILE *pFile;
+	int num;
 	char tmp = '\0';
 	pFile = fopen("setting", "r");
 	if(pFile != NULL){
@@ -473,11 +504,31 @@ void initSetting(){
 		}
 		else{
 			debug = (tmp=='T')?true:false;
+			if(fscanf(pFile, "%9d ", &num) != 1 || num != edgeVarArrSize){
+				fseek(pFile, 81, SEEK_SET);
+				fprintf(pFile, "%9d ", edgeVarArrSize);
+				for(int i = 0; i < edgeVarArrSize; i++){
+					fprintf(pFile, "%c", '0');
+				}
+			}
+			else{
+				char e;
+				for(int i = 0; i <= edgeVarArrSize; i++){
+					fscanf(pFile, "%c", &e);
+					if(e == '0')edgeVarArr[i].exception = false;
+					else edgeVarArr[i].exception = true;
+				}
+			}
 		}
 	}
 	if(!tmp){//make setting file
 		pFile = fopen("setting", "w");
 		fprintf(pFile, "%9d %9d %9d %9d %9d %1.7lf %1.7lf %1.7lf F", timerDelay, minimumSaveDelay, maximumSaveDelay, sectionSize, alarmDelay, referenceVal, referenceRate, sensitivity);
+		fprintf(pFile, "%9d ", edgeVarArrSize);
+		for(int i = 0; i < edgeVarArrSize; i++){
+			fprintf(pFile, "%c", '0');
+			edgeVarArr[i].exception = false;
+		}
 	}
 	fclose(pFile);
 }
@@ -497,6 +548,8 @@ unsigned int WINAPI keyboardInput(void *args){//keyboard input thread
 				printf("quit : quit program\n");
 				printf("restart : restart program\n");
 				printf("hide : hide the window\n");
+				printf("on : alarm on\n");
+				printf("off : alarm off\n");
 				printf("setDelay %%d %%d : set minimum, maximum save delay(sec)\n");
 				printf("setTimer %%d : set timer delay(fps)\n");
 				printf("setAlarm %%d : set alarm delay(sec)\n");
@@ -506,6 +559,8 @@ unsigned int WINAPI keyboardInput(void *args){//keyboard input thread
 					printf("setRefRate %%lf : set reference rate\n");	
 					printf("setSens %%lf : set sensitivity\n");	
 					printf("setSize %%d : set section size\n");
+					printf("addExcept \\n \\n : add exception area\n");
+					printf("subExcept \\n \\n : remove exception area\n");
 				}
 				printf("clear : delete save image\n");
 				printf("info : show information\n");
@@ -642,6 +697,8 @@ unsigned int WINAPI keyboardInput(void *args){//keyboard input thread
 				}
 				break;
 			case CMD_INFO:
+				if(flags & 0x10) printf("alarm off\n");
+				else printf("alarm on\n");
 				printf("Width X Height : %d %d\n", Width, Height);
 				printf("screen capture : %dfps\n", timerDelay);
 				printf("save delay : %d ~ %dsec\n", minimumSaveDelay, maximumSaveDelay);
@@ -653,11 +710,45 @@ unsigned int WINAPI keyboardInput(void *args){//keyboard input thread
 					printf("sensitivity : %lf\n", sensitivity);
 				}
 				break;
+			case CMD_SUBEXCEPT:
+			case CMD_ADDEXCEPT:{
+				POINT mouse[2];
+
+				GetAsyncKeyState(VK_RETURN);
+				while(!(GetAsyncKeyState(VK_RETURN) & 0x0001));
+				GetCursorPos(&mouse[0]);
+				printf("%d %d\n", mouse[0].x, mouse[0].y);
+				while(!(GetAsyncKeyState(VK_RETURN) & 0x0001));
+				GetCursorPos(&mouse[1]);
+				printf("%d %d\n", mouse[1].x, mouse[1].y);
+
+				int Top = min(mouse[0].y, mouse[1].y)/(2 * sectionSize), Bottom = max(mouse[0].y, mouse[1].y)/(2 * sectionSize), Right = max(mouse[0].x, mouse[1].x)/(2 * sectionSize), Left = min(mouse[0].x, mouse[1].x)/(2 * sectionSize);
+			
+				for(int j = Top; j <= Bottom; j++){
+					fseek(pFile, 91 + j * edgeVarArrWidth + Left, SEEK_SET);
+					for(int i = Left; i <= Right; i++){
+						int idx = j * edgeVarArrWidth +  i;
+						edgeVarArr[idx].exception = cmd[buf] == CMD_ADDEXCEPT?true:false;
+						fprintf(pFile, "%c", cmd[buf] == CMD_ADDEXCEPT?'1':'0');
+					}
+				}
+
+				break;}
+			case CMD_ON:
+				flags &= 0xEF;
+				printf("alarm on\n");
+				break;
+			case CMD_OFF:
+				flags |= 0x10;
+				printf("alarm off\n");
+				break;
 			default:
-				printf("command not found\nhelp : show command\n");
+				if(buf[0])
+					printf("command not found\nhelp : show command\n");
 				break;
 		}
 		fclose(pFile);
+		buf[0] = '\0';
 	}
 }
 
